@@ -36,9 +36,16 @@ from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 import unicodedata
 import re
 
+from language_profiles import (
+    LanguageProfile,
+    LanguageProfileRegistry,
+    default_language_registry,
+)
+
 __all__ = [
     "PhoneticTrailingSongModel",
     "AnalysisResult",
+    "LanguageUsage",
     "prepare_data_generation",
     "analyze_text",
 ]
@@ -122,6 +129,8 @@ class PhoneticToken:
     lengthened_value: str
     cubic_value: int
     seed: int
+    language_code: str
+    language_name: str
     language_layers: LanguageLayerGrouping
 
     def as_dict(self) -> Dict[str, object]:
@@ -135,6 +144,8 @@ class PhoneticToken:
             "lengthened": self.lengthened_value,
             "cubic": self.cubic_value,
             "seed": self.seed,
+            "language_code": self.language_code,
+            "language_name": self.language_name,
             "language_layers": [
                 dataclasses.asdict(layer) for layer in self.language_layers.layers
             ],
@@ -155,6 +166,18 @@ class TitleSoundSummary:
 class NumericEquivalenceGroup:
     base36_value: int
     token_indices: List[int]
+
+    def as_dict(self) -> Dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclass
+class LanguageUsage:
+    code: str
+    name: str
+    description: str
+    token_count: int
+    coverage: float
 
     def as_dict(self) -> Dict[str, object]:
         return dataclasses.asdict(self)
@@ -302,6 +325,7 @@ class DataGenerationBundle:
 class AnalysisResult:
     title: Optional[str]
     tokens: List[PhoneticToken]
+    language_usage: List[LanguageUsage]
     title_summaries: List[TitleSoundSummary]
     numeric_equivalences: List[NumericEquivalenceGroup]
     binary_bookmark: BinaryBookmark
@@ -318,6 +342,7 @@ class AnalysisResult:
         return {
             "title": self.title,
             "tokens": [token.as_dict() for token in self.tokens],
+            "language_usage": [usage.as_dict() for usage in self.language_usage],
             "title_summaries": [ts.as_dict() for ts in self.title_summaries],
             "numeric_equivalences": [g.as_dict() for g in self.numeric_equivalences],
             "binary_bookmark": self.binary_bookmark.as_dict(),
@@ -335,8 +360,16 @@ class AnalysisResult:
 class PhoneticTrailingSongModel:
     """Perform phonetic and numeric trailing song analysis."""
 
-    def __init__(self, base_seed: int = 0xC0FFEE):
+    def __init__(
+        self,
+        base_seed: int = 0xC0FFEE,
+        *,
+        language_registry: Optional[LanguageProfileRegistry] = None,
+        default_language_code: str = "en",
+    ):
         self.base_seed = base_seed
+        self.language_registry = language_registry or default_language_registry()
+        self.default_language_code = default_language_code
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -349,8 +382,22 @@ class PhoneticTrailingSongModel:
         seed_from: Optional[str] = None,
         window_size: int = 4,
         compare: bool = False,
+        language_code: Optional[str] = None,
     ) -> AnalysisResult:
-        tokens = list(self._tokenize(text))
+        base_profile, detection_notes = self.language_registry.detect(
+            text,
+            preferred=language_code,
+            fallback=self.default_language_code,
+        )
+        allow_mixed = language_code is None
+        detection_notes["allow_mixed"] = allow_mixed
+
+        tokens, usage_counts = self._tokenize(
+            text,
+            base_profile=base_profile,
+            allow_mixed=allow_mixed,
+        )
+        language_usage = self._summarize_language_usage(usage_counts)
         title_summaries = self._build_title_sound_summaries(text, tokens)
         numeric_groups = self._group_numeric_equivalents(tokens)
         binary_bookmark = self._build_binary_bookmark(tokens, seed_from or title)
@@ -366,15 +413,18 @@ class PhoneticTrailingSongModel:
             "token_count": len(tokens),
             "seed_source": seed_from or title,
             "base_seed": self.base_seed,
+            "language_detection": detection_notes,
         }
 
         if compare and reference_text:
             comparability = self.compare_texts(text, reference_text, window_size=window_size)
             notes["comparability"] = comparability.as_dict()
+        notes["language_usage"] = [usage.as_dict() for usage in language_usage]
 
         return AnalysisResult(
             title=title,
             tokens=tokens,
+            language_usage=language_usage,
             title_summaries=title_summaries,
             numeric_equivalences=numeric_groups,
             binary_bookmark=binary_bookmark,
@@ -395,8 +445,24 @@ class PhoneticTrailingSongModel:
         *,
         window_size: int = 4,
     ) -> ComparabilityResult:
-        current_tokens = list(self._tokenize(current_text))
-        reference_tokens = list(self._tokenize(reference_text))
+        current_profile, _ = self.language_registry.detect(
+            current_text,
+            fallback=self.default_language_code,
+        )
+        reference_profile, _ = self.language_registry.detect(
+            reference_text,
+            fallback=self.default_language_code,
+        )
+        current_tokens, _ = self._tokenize(
+            current_text,
+            base_profile=current_profile,
+            allow_mixed=True,
+        )
+        reference_tokens, _ = self._tokenize(
+            reference_text,
+            base_profile=reference_profile,
+            allow_mixed=True,
+        )
 
         current_base36 = [token.base36_value for token in current_tokens]
         reference_base36 = [token.base36_value for token in reference_tokens]
@@ -446,13 +512,32 @@ class PhoneticTrailingSongModel:
 
     # ------------------------------------------------------------------
     # Internal builders
-    def _tokenize(self, text: str) -> Iterator[PhoneticToken]:
+    def _tokenize(
+        self,
+        text: str,
+        *,
+        base_profile: LanguageProfile,
+        allow_mixed: bool,
+    ) -> Tuple[List[PhoneticToken], Dict[str, int]]:
+        tokens: List[PhoneticToken] = []
+        usage: Dict[str, int] = {}
         for index, match in enumerate(_WORD_RE.finditer(text)):
             raw = match.group(0)
-            normalized = raw.lower()
-            romanized = _strip_accents(raw)
-            ascii_value = _ascii_fallback(raw)
-            phonetic = romanized.lower()
+            if allow_mixed:
+                profile, _ = self.language_registry.detect(
+                    raw,
+                    preferred=None,
+                    fallback=base_profile.code,
+                )
+            else:
+                profile = base_profile
+
+            romanized = profile.romanize(raw)
+            ascii_candidate = _ascii_fallback(romanized)
+            ascii_value = ascii_candidate or _ascii_fallback(raw) or romanized.lower()
+            normalized_source = romanized if romanized else raw
+            normalized = profile.normalize(normalized_source)
+            phonetic = normalized.lower()
             base36_value = _hash_int(phonetic)
             lengthened = _lengthen_base36(base36_value)
             cubic = _cubic_value(base36_value)
@@ -464,20 +549,28 @@ class PhoneticTrailingSongModel:
                     LanguageLayer("normalized", normalized),
                     LanguageLayer("romanized", romanized),
                     LanguageLayer("ascii", ascii_value),
+                    LanguageLayer("language", profile.code),
+                    LanguageLayer("language_name", profile.name),
                 ],
             )
-            yield PhoneticToken(
-                index=index,
-                text=raw,
-                normalized=normalized,
-                phonetic=phonetic,
-                ascii_value=ascii_value,
-                base36_value=base36_value,
-                lengthened_value=lengthened,
-                cubic_value=cubic,
-                seed=seed,
-                language_layers=layers,
+            tokens.append(
+                PhoneticToken(
+                    index=index,
+                    text=raw,
+                    normalized=normalized,
+                    phonetic=phonetic,
+                    ascii_value=ascii_value,
+                    base36_value=base36_value,
+                    lengthened_value=lengthened,
+                    cubic_value=cubic,
+                    seed=seed,
+                    language_code=profile.code,
+                    language_name=profile.name,
+                    language_layers=layers,
+                )
             )
+            usage[profile.code] = usage.get(profile.code, 0) + 1
+        return tokens, usage
 
     def _build_title_sound_summaries(
         self, text: str, tokens: Sequence[PhoneticToken]
@@ -502,6 +595,27 @@ class PhoneticTrailingSongModel:
             for value, indices in sorted(groups.items())
             if len(indices) > 1 or value == 0
         ]
+
+    def _summarize_language_usage(self, usage_counts: Dict[str, int]) -> List[LanguageUsage]:
+        if not usage_counts:
+            return []
+        total = sum(usage_counts.values())
+        summaries: List[LanguageUsage] = []
+        for code, count in sorted(usage_counts.items(), key=lambda item: (-item[1], item[0])):
+            profile = self.language_registry.get(code)
+            name = profile.name if profile else code
+            description = profile.description if profile else ""
+            coverage = count / total if total else 0.0
+            summaries.append(
+                LanguageUsage(
+                    code=code,
+                    name=name,
+                    description=description,
+                    token_count=count,
+                    coverage=round(coverage, 6),
+                )
+            )
+        return summaries
 
     def _build_binary_bookmark(
         self, tokens: Sequence[PhoneticToken], seed_source: Optional[str]
@@ -644,6 +758,14 @@ class PhoneticTrailingSongModel:
         if analysis.title:
             lines.append(f"Analysis Title: {analysis.title}")
         lines.append(f"Token count: {len(analysis.tokens)}")
+        if analysis.language_usage:
+            lines.append("Language Usage:")
+            for usage in analysis.language_usage:
+                percentage = f"{usage.coverage * 100:.2f}%"
+                lines.append(
+                    f"  - {usage.code}: {usage.name} ({usage.token_count} tokens, {percentage})"
+                )
+            lines.append("")
         lines.append("Table of Contents:")
         for marker in analysis.table_of_contents:
             lines.append(f"  - [{marker.anchor}] {marker.title}")
@@ -712,6 +834,7 @@ class PhoneticTrailingSongModel:
         window_size: int = 4,
         include_report: bool = True,
         include_comparability: bool = True,
+        language_code: Optional[str] = None,
     ) -> DataGenerationBundle:
         analysis = self.analyze(
             text,
@@ -720,6 +843,7 @@ class PhoneticTrailingSongModel:
             seed_from=title,
             window_size=window_size,
             compare=bool(reference_text and include_comparability),
+            language_code=language_code,
         )
         report = self.build_report(analysis, include_comparability=include_comparability) if include_report else None
         comparability_dict = (
@@ -779,6 +903,7 @@ def analyze_text(
     title: Optional[str] = None,
     reference_text: Optional[str] = None,
     window_size: int = 4,
+    language_code: Optional[str] = None,
 ) -> AnalysisResult:
     model = PhoneticTrailingSongModel()
     return model.analyze(
@@ -787,6 +912,7 @@ def analyze_text(
         reference_text=reference_text,
         window_size=window_size,
         compare=bool(reference_text),
+        language_code=language_code,
     )
 
 
@@ -798,6 +924,7 @@ def prepare_data_generation(
     window_size: int = 4,
     include_report: bool = True,
     include_comparability: bool = True,
+    language_code: Optional[str] = None,
 ) -> DataGenerationBundle:
     model = PhoneticTrailingSongModel()
     return model.prepare_data_generation(
@@ -807,6 +934,7 @@ def prepare_data_generation(
         window_size=window_size,
         include_report=include_report,
         include_comparability=include_comparability,
+        language_code=language_code,
     )
 
 
@@ -836,15 +964,30 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--emit-json", action="store_true", help="Emit the analysis as JSON")
     parser.add_argument("--emit-data-bundle", metavar="PATH", help="Write a data generation bundle to PATH")
     parser.add_argument("--reference-title", help="Optional title for the reference analysis")
+    parser.add_argument(
+        "--language-code",
+        help="Force a specific language profile (defaults to auto-detection)",
+    )
+    parser.add_argument(
+        "--list-languages",
+        action="store_true",
+        help="List available language profile codes and exit",
+    )
     return parser.parse_args(argv)
 
 
 def _main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
+    model = PhoneticTrailingSongModel()
+
+    if args.list_languages:
+        for profile in model.language_registry.list_profiles():
+            print(f"{profile.code}\t{profile.name} - {profile.description}")
+        return 0
+
     text = _load_text_argument(args.text)
     reference_text = _load_text_argument(args.compare_with) if args.compare_with else None
 
-    model = PhoneticTrailingSongModel()
     analysis = model.analyze(
         text,
         title=args.title,
@@ -852,6 +995,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         seed_from=args.seed_from,
         window_size=args.compare_window_size,
         compare=bool(reference_text),
+        language_code=args.language_code,
     )
 
     if args.select_token is not None:
@@ -878,6 +1022,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
             window_size=args.compare_window_size,
             include_report=not args.no_report,
             include_comparability=bool(reference_text),
+            language_code=args.language_code,
         )
         Path(args.emit_data_bundle).write_text(
             json.dumps(bundle.as_dict(), ensure_ascii=False, indent=2),

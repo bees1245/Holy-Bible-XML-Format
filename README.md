@@ -32,6 +32,8 @@ Key options:
 * `--select-token` – print the slider/seed metrics for a specific token index.
 * `--no-report` and `--emit-json` – suppress the textual report and emit a JSON payload instead.
 * `--emit-data-bundle PATH` – create a machine-learning friendly bundle with prompts and completions.
+* `--language-code CODE` – force a specific language profile (otherwise the model auto-detects per token).
+* `--list-languages` – print the available language profiles (covering Latin, Greek, Cyrillic, Arabic, Hebrew, Devanagari, Hangul, and Kana scripts) and exit.
 
 ### HTTP API
 
@@ -49,15 +51,29 @@ POST JSON requests to `/analyze` with the following schema:
   "title": "My Analysis",
   "text": "Amazing grace how sweet the sound",
   "reference_text": "Amazing grace a song of sound",
+  "language_code": "el",
   "options": {
     "include_bundle": true,
-    "window_size": 2
+    "window_size": 2,
+    "language_code": "el"
   }
 }
 ```
 
 The response contains the structured analysis and, if requested, a reusable data
-bundle.
+bundle.  The root metadata endpoint (`GET /`) now lists every built-in language
+profile so clients can select a compatible transliteration strategy ahead of
+time.
+
+### Language profiles
+
+The new `language_profiles.py` module centralises lightweight transliteration
+and detection heuristics for common scripts without relying on external
+packages.  Profiles currently cover English, Spanish, French, German,
+Portuguese, Greek, Russian/Ukrainian (Cyrillic), Arabic, Hebrew, Hindi
+(Devanagari), Korean (Hangul), and Japanese Kana.  Custom code can instantiate
+`LanguageProfileRegistry` directly or extend it with additional scripts before
+passing it into `PhoneticTrailingSongModel`.
 
 ### Repository chunk planner
 

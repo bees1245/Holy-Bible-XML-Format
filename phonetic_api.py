@@ -36,6 +36,14 @@ class PhoneticAPI:
                         "description": "Run phonetic analysis and optional bundle export",
                     },
                 ],
+                "languages": [
+                    {
+                        "code": profile.code,
+                        "name": profile.name,
+                        "description": profile.description,
+                    }
+                    for profile in self._model.language_registry.list_profiles()
+                ],
             }
             return self._respond_json(start_response, metadata)
         if method == "POST" and path == "/analyze":
@@ -80,6 +88,7 @@ class PhoneticAPI:
         window_size = int(options.get("window_size") or 4)
         include_report = options.get("include_report", True)
         include_comparability = options.get("include_comparability", bool(reference_text))
+        language_code = data.get("language_code") or options.get("language_code")
 
         analysis = self._model.analyze(
             text,
@@ -88,6 +97,7 @@ class PhoneticAPI:
             seed_from=data.get("seed_from"),
             window_size=window_size,
             compare=bool(reference_text and include_comparability),
+            language_code=language_code,
         )
 
         response = {
@@ -102,6 +112,7 @@ class PhoneticAPI:
                 window_size=window_size,
                 include_report=include_report,
                 include_comparability=include_comparability,
+                language_code=language_code,
             )
             response["bundle"] = bundle.as_dict()
 
