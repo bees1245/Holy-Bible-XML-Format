@@ -41,6 +41,15 @@ first) rendering of the title/tokens, along with an ASCII fallback and a
 deterministic seed.  This satisfies workflows that require phonetic ordering to
 be derived purely from the written form rather than spoken pronunciations.
 
+### Read-aloud codex
+
+The analyzer now emits a "cold start" read-aloud codex that breaks each token
+into syllable-like beats, calculates deterministic intensity levels, and
+produces dimmable sliders for narration tooling.  CLI reports list the top
+entries, while JSON outputs include per-syllable intensity, dim ratios, and
+primary/secondary emphasis markers so text-to-speech systems can start reading
+aloud immediately without additional calibration.
+
 ### Knowledge base output
 
 Every run now produces a structured knowledge base that captures per-token
@@ -77,7 +86,8 @@ The response contains the structured analysis and, if requested, a reusable data
 bundle.  The root metadata endpoint (`GET /`) now lists every built-in language
 profile so clients can select a compatible transliteration strategy ahead of
 time, and advertises the available capabilities (structured analysis, silent
-writing titles, knowledge-base export, and bundle generation).
+writing titles, read-aloud codex export, knowledge-base export, and bundle
+generation).
 
 ### Language profiles
 

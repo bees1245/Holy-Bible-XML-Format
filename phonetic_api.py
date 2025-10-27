@@ -39,6 +39,7 @@ class PhoneticAPI:
                 "capabilities": [
                     "structured_analysis",
                     "silent_language_titles",
+                    "read_aloud_codex",
                     "knowledge_base",
                     "data_bundle_export",
                 ],

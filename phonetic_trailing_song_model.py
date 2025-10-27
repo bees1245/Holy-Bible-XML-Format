@@ -47,6 +47,8 @@ __all__ = [
     "AnalysisResult",
     "LanguageUsage",
     "SilentLanguageTitle",
+    "ReadAloudCodexEntry",
+    "SyllableBeat",
     "KnowledgeBase",
     "prepare_data_generation",
     "analyze_text",
@@ -54,6 +56,7 @@ __all__ = [
 
 _WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 _BASE36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+_SYLLABLE_VOWELS = set("aeiouy")
 
 
 def _strip_accents(value: str) -> str:
@@ -96,6 +99,45 @@ def _cubic_value(value: int) -> int:
     return value ** 3
 
 
+def _syllabify_candidate(raw: str) -> List[str]:
+    cleaned = re.sub(r"[^a-z0-9]+", "", raw.lower())
+    if not cleaned:
+        return []
+    segments: List[str] = []
+    start = 0
+    for idx in range(1, len(cleaned)):
+        prev = cleaned[idx - 1]
+        curr = cleaned[idx]
+        prev_is_vowel = prev in _SYLLABLE_VOWELS
+        curr_is_vowel = curr in _SYLLABLE_VOWELS
+        next_is_vowel = cleaned[idx + 1] in _SYLLABLE_VOWELS if idx + 1 < len(cleaned) else False
+        should_split = False
+        if not prev_is_vowel and curr_is_vowel:
+            should_split = True
+        elif prev_is_vowel and curr_is_vowel and not next_is_vowel:
+            should_split = True
+        elif prev_is_vowel and not curr_is_vowel and next_is_vowel:
+            should_split = True
+        if should_split and idx > start:
+            segments.append(cleaned[start:idx])
+            start = idx
+    tail = cleaned[start:]
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _resolve_syllables(*candidates: str) -> List[str]:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        segments = _syllabify_candidate(candidate)
+        if segments:
+            return segments
+    fallback = next((candidate for candidate in candidates if candidate), "")
+    return [fallback] if fallback else []
+
+
 def _slider_bar(value: int, maximum: int) -> str:
     if maximum <= 0:
         return "|"
@@ -134,6 +176,7 @@ class PhoneticToken:
     language_code: str
     language_name: str
     language_layers: LanguageLayerGrouping
+    syllables: List[str]
 
     def as_dict(self) -> Dict[str, object]:
         return {
@@ -151,6 +194,7 @@ class PhoneticToken:
             "language_layers": [
                 dataclasses.asdict(layer) for layer in self.language_layers.layers
             ],
+            "syllables": list(self.syllables),
         }
 
 
@@ -205,6 +249,37 @@ class TokenSeedDetail:
 
     def as_dict(self) -> Dict[str, object]:
         return dataclasses.asdict(self)
+
+
+@dataclass
+class SyllableBeat:
+    token_index: int
+    syllable_index: int
+    syllable: str
+    intensity: int
+    dim_level: float
+    emphasis: str
+
+    def as_dict(self) -> Dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclass
+class ReadAloudCodexEntry:
+    token_index: int
+    token_text: str
+    average_intensity: float
+    slider: str
+    beats: List[SyllableBeat]
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "token_index": self.token_index,
+            "token_text": self.token_text,
+            "average_intensity": self.average_intensity,
+            "slider": self.slider,
+            "beats": [beat.as_dict() for beat in self.beats],
+        }
 
 
 @dataclass
@@ -390,6 +465,7 @@ class AnalysisResult:
     numeric_equivalences: List[NumericEquivalenceGroup]
     binary_bookmark: BinaryBookmark
     token_seeds: List[TokenSeedDetail]
+    read_aloud_codex: List[ReadAloudCodexEntry]
     repetition_clusters: List[NumericRepetitionCluster]
     table_of_contents: List[TableOfContentsMarker]
     universal_similarity: List[UniversalSimilarityGroup]
@@ -409,6 +485,7 @@ class AnalysisResult:
             "numeric_equivalences": [g.as_dict() for g in self.numeric_equivalences],
             "binary_bookmark": self.binary_bookmark.as_dict(),
             "token_seeds": [seed.as_dict() for seed in self.token_seeds],
+            "read_aloud_codex": [entry.as_dict() for entry in self.read_aloud_codex],
             "repetition_clusters": [rc.as_dict() for rc in self.repetition_clusters],
             "table_of_contents": [toc.as_dict() for toc in self.table_of_contents],
             "universal_similarity": [g.as_dict() for g in self.universal_similarity],
@@ -466,6 +543,7 @@ class PhoneticTrailingSongModel:
         numeric_groups = self._group_numeric_equivalents(tokens)
         binary_bookmark = self._build_binary_bookmark(tokens, seed_from or title)
         token_seeds = self._build_token_seeds(tokens)
+        read_aloud_codex = self._build_read_aloud_codex(tokens, seed_from or title)
         repetitions = self._build_repetition_clusters(tokens)
         universal = self._build_universal_similarity(tokens)
         silent_titles = self._build_silent_language_titles(
@@ -501,6 +579,14 @@ class PhoneticTrailingSongModel:
             notes["comparability"] = comparability.as_dict()
         notes["language_usage"] = [usage.as_dict() for usage in language_usage]
         notes["silent_titles"] = [silent.as_dict() for silent in silent_titles]
+        notes["read_aloud_codex"] = {
+            "tokens": len(read_aloud_codex),
+            "syllables": sum(len(entry.beats) for entry in read_aloud_codex),
+            "max_intensity": max(
+                (beat.intensity for entry in read_aloud_codex for beat in entry.beats),
+                default=0,
+            ),
+        }
         notes["knowledge"] = {
             "entries": len(knowledge_base.entries),
             "clusters": len(knowledge_base.clusters),
@@ -514,6 +600,7 @@ class PhoneticTrailingSongModel:
             numeric_equivalences=numeric_groups,
             binary_bookmark=binary_bookmark,
             token_seeds=token_seeds,
+            read_aloud_codex=read_aloud_codex,
             repetition_clusters=repetitions,
             table_of_contents=toc,
             universal_similarity=universal,
@@ -629,6 +716,7 @@ class PhoneticTrailingSongModel:
             lengthened = _lengthen_base36(base36_value)
             cubic = _cubic_value(base36_value)
             seed = _hash_int(f"{self.base_seed}:{phonetic}:{index}", modulo=2 ** 31)
+            syllables = _resolve_syllables(ascii_value, romanized, normalized, raw)
             layers = LanguageLayerGrouping(
                 token_index=index,
                 layers=[
@@ -654,6 +742,7 @@ class PhoneticTrailingSongModel:
                     language_code=profile.code,
                     language_name=profile.name,
                     language_layers=layers,
+                    syllables=syllables,
                 )
             )
             usage[profile.code] = usage.get(profile.code, 0) + 1
@@ -740,6 +829,62 @@ class PhoneticTrailingSongModel:
                 )
             )
         return details
+
+    def _build_read_aloud_codex(
+        self,
+        tokens: Sequence[PhoneticToken],
+        seed_source: Optional[str],
+    ) -> List[ReadAloudCodexEntry]:
+        proto_entries: List[Tuple[int, str, List[Tuple[str, int, float]]]] = []
+        global_max = 1
+        seed_basis = seed_source or ""
+        for token in tokens:
+            beat_details: List[Tuple[str, int, float]] = []
+            syllables = token.syllables or [token.phonetic]
+            for syllable_index, syllable in enumerate(syllables):
+                beat_seed_input = f"{self.base_seed}:{token.seed}:{syllable}:{syllable_index}:{seed_basis}"
+                beat_seed = _hash_int(beat_seed_input, modulo=1000)
+                intensity = 30 + (beat_seed % 71)
+                dim_level = round((100 - intensity) / 100, 3)
+                beat_details.append((syllable, intensity, dim_level))
+                global_max = max(global_max, intensity)
+            proto_entries.append((token.index, token.text, beat_details))
+
+        codex_entries: List[ReadAloudCodexEntry] = []
+        for token_index, token_text, beat_info in proto_entries:
+            if beat_info:
+                intensities = [info[1] for info in beat_info]
+                avg_intensity = sum(intensities) / len(intensities)
+                peak_intensity = max(intensities)
+            else:
+                intensities = []
+                avg_intensity = 0.0
+                peak_intensity = 0
+            slider = _slider_bar(int(round(avg_intensity)), int(global_max))
+            beats: List[SyllableBeat] = []
+            for syllable_index, (syllable, intensity, dim_level) in enumerate(beat_info):
+                emphasis = "primary" if intensity == peak_intensity else "secondary"
+                beats.append(
+                    SyllableBeat(
+                        token_index=token_index,
+                        syllable_index=syllable_index,
+                        syllable=syllable,
+                        intensity=intensity,
+                        dim_level=dim_level,
+                        emphasis=emphasis,
+                    )
+                )
+            codex_entries.append(
+                ReadAloudCodexEntry(
+                    token_index=token_index,
+                    token_text=token_text,
+                    average_intensity=round(avg_intensity, 2),
+                    slider=slider,
+                    beats=beats,
+                )
+            )
+
+        return codex_entries
 
     def _build_repetition_clusters(
         self, tokens: Sequence[PhoneticToken]
@@ -1068,6 +1213,17 @@ class PhoneticTrailingSongModel:
         if not analysis.token_seeds:
             lines.append("  (none)")
         lines.append("")
+        lines.append("Read Aloud Codex (first 10 tokens):")
+        for entry in analysis.read_aloud_codex[:10]:
+            beat_summary = ", ".join(
+                f"{beat.syllable}:{beat.intensity}" for beat in entry.beats
+            ) or "∅"
+            lines.append(
+                f"  idx={entry.token_index} '{entry.token_text}' avg={entry.average_intensity} {entry.slider} -> {beat_summary}"
+            )
+        if not analysis.read_aloud_codex:
+            lines.append("  (none)")
+        lines.append("")
         lines.append("Universal Similarity Groups:")
         for group in analysis.universal_similarity[:10]:
             lines.append(f"  signature={group.signature} indices={group.token_indices}")
@@ -1301,6 +1457,16 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         selected = next((seed for seed in analysis.token_seeds if seed.token_index == args.select_token), None)
         if selected:
             print(f"Token {selected.token_index}: seed={selected.base_seed} {selected.slider}")
+            codex_entry = next(
+                (entry for entry in analysis.read_aloud_codex if entry.token_index == args.select_token),
+                None,
+            )
+            if codex_entry:
+                beats = ", ".join(
+                    f"#{beat.syllable_index}:{beat.syllable}:{beat.intensity}/{beat.dim_level}"
+                    for beat in codex_entry.beats
+                )
+                print(f"  Read aloud beats -> {beats}")
         else:
             print(f"Token {args.select_token} not found", file=sys.stderr)
 
