@@ -46,6 +46,7 @@ __all__ = [
     "PhoneticTrailingSongModel",
     "AnalysisResult",
     "LanguageUsage",
+    "SilentLanguageTitle",
     "KnowledgeBase",
     "prepare_data_generation",
     "analyze_text",
@@ -249,6 +250,20 @@ class TitleLanguageRecord:
 
 
 @dataclass
+class SilentLanguageTitle:
+    language_code: str
+    language_name: str
+    forwards_text: str
+    backwards_text: str
+    ascii_backwards: str
+    writing_seed: str
+    token_indices: List[int]
+
+    def as_dict(self) -> Dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclass
 class CodeGapTitle:
     token_index: int
     reason: str
@@ -379,6 +394,7 @@ class AnalysisResult:
     table_of_contents: List[TableOfContentsMarker]
     universal_similarity: List[UniversalSimilarityGroup]
     title_language_records: List[TitleLanguageRecord]
+    silent_language_titles: List[SilentLanguageTitle]
     code_gap_titles: List[CodeGapTitle]
     name_time_markers: List[NameTimeMarker]
     knowledge_base: KnowledgeBase
@@ -397,6 +413,7 @@ class AnalysisResult:
             "table_of_contents": [toc.as_dict() for toc in self.table_of_contents],
             "universal_similarity": [g.as_dict() for g in self.universal_similarity],
             "title_language_records": [r.as_dict() for r in self.title_language_records],
+            "silent_language_titles": [s.as_dict() for s in self.silent_language_titles],
             "code_gap_titles": [c.as_dict() for c in self.code_gap_titles],
             "name_time_markers": [m.as_dict() for m in self.name_time_markers],
             "knowledge_base": self.knowledge_base.as_dict(),
@@ -451,7 +468,17 @@ class PhoneticTrailingSongModel:
         token_seeds = self._build_token_seeds(tokens)
         repetitions = self._build_repetition_clusters(tokens)
         universal = self._build_universal_similarity(tokens)
-        toc = self._build_table_of_contents(tokens, title_summaries, universal)
+        silent_titles = self._build_silent_language_titles(
+            tokens,
+            language_usage,
+            title=title,
+        )
+        toc = self._build_table_of_contents(
+            tokens,
+            title_summaries,
+            universal,
+            silent_titles,
+        )
         title_language = self._build_title_language_records(toc)
         code_gaps = self._build_code_gap_titles(tokens, numeric_groups, binary_bookmark)
         name_markers = self._build_name_time_markers(title_language)
@@ -473,6 +500,7 @@ class PhoneticTrailingSongModel:
             comparability = self.compare_texts(text, reference_text, window_size=window_size)
             notes["comparability"] = comparability.as_dict()
         notes["language_usage"] = [usage.as_dict() for usage in language_usage]
+        notes["silent_titles"] = [silent.as_dict() for silent in silent_titles]
         notes["knowledge"] = {
             "entries": len(knowledge_base.entries),
             "clusters": len(knowledge_base.clusters),
@@ -490,6 +518,7 @@ class PhoneticTrailingSongModel:
             table_of_contents=toc,
             universal_similarity=universal,
             title_language_records=title_language,
+            silent_language_titles=silent_titles,
             code_gap_titles=code_gaps,
             name_time_markers=name_markers,
             knowledge_base=knowledge_base,
@@ -742,6 +771,7 @@ class PhoneticTrailingSongModel:
         tokens: Sequence[PhoneticToken],
         summaries: Sequence[TitleSoundSummary],
         universal: Sequence[UniversalSimilarityGroup],
+        silent_titles: Sequence[SilentLanguageTitle],
     ) -> List[TableOfContentsMarker]:
         markers: List[TableOfContentsMarker] = []
         sections = [
@@ -751,6 +781,10 @@ class PhoneticTrailingSongModel:
         sections += [
             (f"similarity-{group.signature}", f"Similarity: {group.signature}")
             for group in universal[:10]
+        ]
+        sections += [
+            (f"silent-{silent.language_code}", f"Silent {silent.language_name}")
+            for silent in silent_titles
         ]
         for idx, (anchor, title) in enumerate(sections):
             start = idx * max(1, len(tokens) // max(1, len(sections)))
@@ -774,6 +808,65 @@ class PhoneticTrailingSongModel:
                 TitleLanguageRecord(order=order + 1, anchor=marker.anchor, narrative=narrative)
             )
         return records
+
+    def _build_silent_language_titles(
+        self,
+        tokens: Sequence[PhoneticToken],
+        usage: Sequence[LanguageUsage],
+        *,
+        title: Optional[str],
+    ) -> List[SilentLanguageTitle]:
+        usage_lookup = {item.code: item for item in usage}
+        tokens_by_language: Dict[str, List[PhoneticToken]] = {}
+        for token in tokens:
+            tokens_by_language.setdefault(token.language_code, []).append(token)
+
+        silent_titles: List[SilentLanguageTitle] = []
+        for code, lang_tokens in sorted(tokens_by_language.items()):
+            usage_item = usage_lookup.get(code)
+            language_name = usage_item.name if usage_item else code
+            forward_tokens = [token.normalized for token in lang_tokens if token.normalized]
+            forward_text = " ".join(forward_tokens).strip()
+            if not forward_text and title:
+                forward_text = title
+            reversed_tokens = list(reversed(lang_tokens))
+            backwards_text = " ".join(
+                token.normalized for token in reversed_tokens if token.normalized
+            ).strip()
+            if not backwards_text and forward_text:
+                backwards_text = " ".join(reversed(forward_text.split()))
+            ascii_backwards = _ascii_fallback(backwards_text) if backwards_text else ""
+            seed_input = f"{code}:{backwards_text or forward_text or title or ''}"
+            seed_value = _hash_int(seed_input, modulo=36 ** 8)
+            silent_titles.append(
+                SilentLanguageTitle(
+                    language_code=code,
+                    language_name=f"{language_name} (silent writing)",
+                    forwards_text=forward_text,
+                    backwards_text=backwards_text,
+                    ascii_backwards=ascii_backwards,
+                    writing_seed=_base36(seed_value),
+                    token_indices=[token.index for token in lang_tokens],
+                )
+            )
+
+        if not silent_titles and title:
+            backwards_title = " ".join(reversed(title.split())) or title[::-1]
+            ascii_backwards = _ascii_fallback(backwards_title) if backwards_title else ""
+            seed_value = _hash_int(f"title:{title}", modulo=36 ** 8)
+            silent_titles.append(
+                SilentLanguageTitle(
+                    language_code="title",
+                    language_name="Title (silent writing)",
+                    forwards_text=title,
+                    backwards_text=backwards_title,
+                    ascii_backwards=ascii_backwards,
+                    writing_seed=_base36(seed_value),
+                    token_indices=[],
+                )
+            )
+
+        return silent_titles
 
     def _build_code_gap_titles(
         self,
@@ -918,6 +1011,23 @@ class PhoneticTrailingSongModel:
         if analysis.title:
             lines.append(f"Analysis Title: {analysis.title}")
         lines.append(f"Token count: {len(analysis.tokens)}")
+        lines.append("Silent Writing Titles:")
+        for silent in analysis.silent_language_titles:
+            backwards = silent.backwards_text or "∅"
+            lines.append(
+                f"  - {silent.language_code}: {backwards} [seed {silent.writing_seed}]"
+            )
+            if silent.forwards_text and silent.forwards_text != backwards:
+                lines.append(f"    forwards: {silent.forwards_text}")
+            if (
+                silent.ascii_backwards
+                and silent.ascii_backwards != backwards
+                and silent.ascii_backwards != silent.forwards_text
+            ):
+                lines.append(f"    ascii: {silent.ascii_backwards}")
+        if not analysis.silent_language_titles:
+            lines.append("  (none)")
+        lines.append("")
         if analysis.language_usage:
             lines.append("Language Usage:")
             for usage in analysis.language_usage:

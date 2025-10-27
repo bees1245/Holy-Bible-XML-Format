@@ -35,6 +35,12 @@ Key options:
 * `--language-code CODE` – force a specific language profile (otherwise the model auto-detects per token).
 * `--list-languages` – print the available language profiles (covering Latin, Greek, Cyrillic, Arabic, Hebrew, Devanagari, Hangul, and Kana scripts) and exit.
 
+Every textual report opens with a **silent writing title** section: for each
+language represented in the input the toolkit records the backwards (writing
+first) rendering of the title/tokens, along with an ASCII fallback and a
+deterministic seed.  This satisfies workflows that require phonetic ordering to
+be derived purely from the written form rather than spoken pronunciations.
+
 ### Knowledge base output
 
 Every run now produces a structured knowledge base that captures per-token
@@ -70,8 +76,8 @@ POST JSON requests to `/analyze` with the following schema:
 The response contains the structured analysis and, if requested, a reusable data
 bundle.  The root metadata endpoint (`GET /`) now lists every built-in language
 profile so clients can select a compatible transliteration strategy ahead of
-time, and advertises the available capabilities (structured analysis,
-knowledge-base export, and bundle generation).
+time, and advertises the available capabilities (structured analysis, silent
+writing titles, knowledge-base export, and bundle generation).
 
 ### Language profiles
 
