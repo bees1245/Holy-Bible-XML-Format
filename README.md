@@ -35,6 +35,13 @@ Key options:
 * `--language-code CODE` – force a specific language profile (otherwise the model auto-detects per token).
 * `--list-languages` – print the available language profiles (covering Latin, Greek, Cyrillic, Arabic, Hebrew, Devanagari, Hangul, and Kana scripts) and exit.
 
+### Knowledge base output
+
+Every run now produces a structured knowledge base that captures per-token
+signatures, repeating clusters, and aggregated "wisdom" insights.  The CLI
+report surfaces the top entries, while JSON exports and data bundles expose the
+full dataset for downstream storage engines or retrieval workflows.
+
 ### HTTP API
 
 `phonetic_api.py` wraps the model in a tiny WSGI application.  Run it with the
@@ -63,7 +70,8 @@ POST JSON requests to `/analyze` with the following schema:
 The response contains the structured analysis and, if requested, a reusable data
 bundle.  The root metadata endpoint (`GET /`) now lists every built-in language
 profile so clients can select a compatible transliteration strategy ahead of
-time.
+time, and advertises the available capabilities (structured analysis,
+knowledge-base export, and bundle generation).
 
 ### Language profiles
 

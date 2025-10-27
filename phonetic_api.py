@@ -36,6 +36,11 @@ class PhoneticAPI:
                         "description": "Run phonetic analysis and optional bundle export",
                     },
                 ],
+                "capabilities": [
+                    "structured_analysis",
+                    "knowledge_base",
+                    "data_bundle_export",
+                ],
                 "languages": [
                     {
                         "code": profile.code,

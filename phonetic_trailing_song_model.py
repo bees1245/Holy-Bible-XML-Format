@@ -46,6 +46,7 @@ __all__ = [
     "PhoneticTrailingSongModel",
     "AnalysisResult",
     "LanguageUsage",
+    "KnowledgeBase",
     "prepare_data_generation",
     "analyze_text",
 ]
@@ -267,6 +268,50 @@ class NameTimeMarker:
 
 
 @dataclass
+class KnowledgeEntry:
+    token_index: int
+    surface: str
+    normalized: str
+    base36: str
+    lengthened: str
+    cubic: int
+    seed: int
+    language_code: str
+    language_name: str
+    universal_signature: Optional[str]
+    numeric_group_size: int
+    repetition_count: int
+
+    def as_dict(self) -> Dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclass
+class KnowledgeCluster:
+    kind: str
+    label: str
+    token_indices: List[int]
+    summary: str
+
+    def as_dict(self) -> Dict[str, object]:
+        return dataclasses.asdict(self)
+
+
+@dataclass
+class KnowledgeBase:
+    entries: List[KnowledgeEntry]
+    clusters: List[KnowledgeCluster]
+    insights: List[str]
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "entries": [entry.as_dict() for entry in self.entries],
+            "clusters": [cluster.as_dict() for cluster in self.clusters],
+            "insights": list(self.insights),
+        }
+
+
+@dataclass
 class ComparabilityWindow:
     window_index: int
     current_tokens: List[str]
@@ -336,6 +381,7 @@ class AnalysisResult:
     title_language_records: List[TitleLanguageRecord]
     code_gap_titles: List[CodeGapTitle]
     name_time_markers: List[NameTimeMarker]
+    knowledge_base: KnowledgeBase
     analysis_notes: Dict[str, object]
 
     def as_dict(self) -> Dict[str, object]:
@@ -353,6 +399,7 @@ class AnalysisResult:
             "title_language_records": [r.as_dict() for r in self.title_language_records],
             "code_gap_titles": [c.as_dict() for c in self.code_gap_titles],
             "name_time_markers": [m.as_dict() for m in self.name_time_markers],
+            "knowledge_base": self.knowledge_base.as_dict(),
             "analysis_notes": self.analysis_notes,
         }
 
@@ -408,6 +455,12 @@ class PhoneticTrailingSongModel:
         title_language = self._build_title_language_records(toc)
         code_gaps = self._build_code_gap_titles(tokens, numeric_groups, binary_bookmark)
         name_markers = self._build_name_time_markers(title_language)
+        knowledge_base = self._build_knowledge_base(
+            tokens,
+            numeric_groups,
+            universal,
+            repetitions,
+        )
 
         notes: Dict[str, object] = {
             "token_count": len(tokens),
@@ -420,6 +473,10 @@ class PhoneticTrailingSongModel:
             comparability = self.compare_texts(text, reference_text, window_size=window_size)
             notes["comparability"] = comparability.as_dict()
         notes["language_usage"] = [usage.as_dict() for usage in language_usage]
+        notes["knowledge"] = {
+            "entries": len(knowledge_base.entries),
+            "clusters": len(knowledge_base.clusters),
+        }
 
         return AnalysisResult(
             title=title,
@@ -435,6 +492,7 @@ class PhoneticTrailingSongModel:
             title_language_records=title_language,
             code_gap_titles=code_gaps,
             name_time_markers=name_markers,
+            knowledge_base=knowledge_base,
             analysis_notes=notes,
         )
 
@@ -746,6 +804,108 @@ class PhoneticTrailingSongModel:
             markers.append(NameTimeMarker(order=record.order, label=label, summary=summary))
         return markers
 
+    def _build_knowledge_base(
+        self,
+        tokens: Sequence[PhoneticToken],
+        numeric_groups: Sequence[NumericEquivalenceGroup],
+        universal_groups: Sequence[UniversalSimilarityGroup],
+        repetitions: Sequence[NumericRepetitionCluster],
+    ) -> KnowledgeBase:
+        numeric_membership: Dict[int, int] = {}
+        for group in numeric_groups:
+            for idx in group.token_indices:
+                numeric_membership[idx] = len(group.token_indices)
+
+        universal_membership: Dict[int, str] = {}
+        for group in universal_groups:
+            for idx in group.token_indices:
+                universal_membership.setdefault(idx, group.signature)
+
+        repetition_membership: Dict[int, int] = {}
+        for cluster in repetitions:
+            for idx in cluster.occurrences:
+                repetition_membership[idx] = len(cluster.occurrences)
+
+        entries: List[KnowledgeEntry] = []
+        for token in tokens:
+            entries.append(
+                KnowledgeEntry(
+                    token_index=token.index,
+                    surface=token.text,
+                    normalized=token.normalized,
+                    base36=_base36(token.base36_value),
+                    lengthened=token.lengthened_value,
+                    cubic=token.cubic_value,
+                    seed=token.seed,
+                    language_code=token.language_code,
+                    language_name=token.language_name,
+                    universal_signature=universal_membership.get(token.index),
+                    numeric_group_size=numeric_membership.get(token.index, 1),
+                    repetition_count=repetition_membership.get(token.index, 1),
+                )
+            )
+
+        clusters: List[KnowledgeCluster] = []
+        for group in numeric_groups:
+            base36_value = _base36(group.base36_value)
+            clusters.append(
+                KnowledgeCluster(
+                    kind="numeric",
+                    label=base36_value,
+                    token_indices=group.token_indices,
+                    summary=f"{len(group.token_indices)} tokens share numeric signature {base36_value}",
+                )
+            )
+        for group in universal_groups:
+            clusters.append(
+                KnowledgeCluster(
+                    kind="universal",
+                    label=group.signature,
+                    token_indices=group.token_indices,
+                    summary=f"{len(group.token_indices)} tokens share universal signature '{group.signature}'",
+                )
+            )
+        for cluster in repetitions:
+            base36_value = _base36(cluster.base36_value)
+            clusters.append(
+                KnowledgeCluster(
+                    kind="repetition",
+                    label=base36_value,
+                    token_indices=cluster.occurrences,
+                    summary=f"{len(cluster.occurrences)} repeated occurrences of {base36_value}",
+                )
+            )
+
+        insights: List[str] = []
+        if tokens:
+            unique_signatures = len({token.base36_value for token in tokens})
+            insights.append(
+                f"{unique_signatures} unique base36 signatures across {len(tokens)} tokens"
+            )
+            strongest_seed = max(tokens, key=lambda token: token.seed)
+            insights.append(
+                f"Highest seed token #{strongest_seed.index} '{strongest_seed.text}' (seed {strongest_seed.seed})"
+            )
+            language_counts: Dict[str, int] = {}
+            for token in tokens:
+                language_counts[token.language_name] = language_counts.get(token.language_name, 0) + 1
+            if language_counts:
+                primary_language, count = max(language_counts.items(), key=lambda item: item[1])
+                insights.append(f"Primary language {primary_language} covers {count} tokens")
+        if numeric_groups:
+            top_numeric = max(numeric_groups, key=lambda group: len(group.token_indices))
+            insights.append(
+                f"Numeric signature {_base36(top_numeric.base36_value)} repeats {len(top_numeric.token_indices)} times"
+            )
+        if universal_groups:
+            top_universal = max(universal_groups, key=lambda group: len(group.token_indices))
+            insights.append(
+                f"Universal signature '{top_universal.signature}' shared by {len(top_universal.token_indices)} tokens"
+            )
+
+        deduped_insights = list(dict.fromkeys(insights))
+        return KnowledgeBase(entries=entries, clusters=clusters, insights=deduped_insights)
+
     # ------------------------------------------------------------------
     # Reporting helpers
     def build_report(
@@ -813,6 +973,27 @@ class PhoneticTrailingSongModel:
         lines.append("Name Order Timeline:")
         for marker in analysis.name_time_markers:
             lines.append(f"  {marker.label}: {marker.summary}")
+        lines.append("")
+        lines.append("Knowledge Base Insights:")
+        for insight in analysis.knowledge_base.insights[:10]:
+            lines.append(f"  - {insight}")
+        if not analysis.knowledge_base.insights:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Knowledge Entries (first 5):")
+        for entry in analysis.knowledge_base.entries[:5]:
+            universal = entry.universal_signature or "∅"
+            lines.append(
+                f"  #{entry.token_index} '{entry.surface}' base36={entry.base36} universal={universal} group={entry.numeric_group_size}"
+            )
+        if not analysis.knowledge_base.entries:
+            lines.append("  (none)")
+        lines.append("")
+        lines.append("Knowledge Clusters (first 5):")
+        for cluster in analysis.knowledge_base.clusters[:5]:
+            lines.append(f"  [{cluster.kind}] {cluster.summary} -> {cluster.token_indices}")
+        if not analysis.knowledge_base.clusters:
+            lines.append("  (none)")
         if include_comparability and "comparability" in analysis.analysis_notes:
             lines.append("")
             lines.append("Comparability Summary:")
@@ -865,6 +1046,14 @@ class PhoneticTrailingSongModel:
         summary_prompt = "Summarise the binary bookmark significance"
         summary_completion = json.dumps(analysis.binary_bookmark.as_dict())
         examples.append(DataGenerationExample(prompt=summary_prompt, completion=summary_completion))
+        if analysis.knowledge_base.insights:
+            insights_prompt = "List the primary knowledge base insights"
+            insights_completion = json.dumps(
+                analysis.knowledge_base.insights[:5], ensure_ascii=False
+            )
+            examples.append(
+                DataGenerationExample(prompt=insights_prompt, completion=insights_completion)
+            )
         if report:
             examples.append(
                 DataGenerationExample(
