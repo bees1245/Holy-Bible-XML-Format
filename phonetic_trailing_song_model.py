@@ -524,6 +524,7 @@ class PhoneticTrailingSongModel:
         window_size: int = 4,
         compare: bool = False,
         language_code: Optional[str] = None,
+        exclude_languages: Optional[Sequence[str]] = None,
     ) -> AnalysisResult:
         base_profile, detection_notes = self.language_registry.detect(
             text,
@@ -533,10 +534,11 @@ class PhoneticTrailingSongModel:
         allow_mixed = language_code is None
         detection_notes["allow_mixed"] = allow_mixed
 
-        tokens, usage_counts = self._tokenize(
+        tokens, usage_counts, excluded_hits = self._tokenize(
             text,
             base_profile=base_profile,
             allow_mixed=allow_mixed,
+            excluded_languages=exclude_languages,
         )
         language_usage = self._summarize_language_usage(usage_counts)
         title_summaries = self._build_title_sound_summaries(text, tokens)
@@ -573,6 +575,13 @@ class PhoneticTrailingSongModel:
             "base_seed": self.base_seed,
             "language_detection": detection_notes,
         }
+
+        requested_exclusions = sorted({code.lower() for code in exclude_languages or []})
+        if requested_exclusions:
+            notes["language_exclusions"] = {
+                "requested": requested_exclusions,
+                "encountered": excluded_hits,
+            }
 
         if compare and reference_text:
             comparability = self.compare_texts(text, reference_text, window_size=window_size)
@@ -627,12 +636,12 @@ class PhoneticTrailingSongModel:
             reference_text,
             fallback=self.default_language_code,
         )
-        current_tokens, _ = self._tokenize(
+        current_tokens, _, _ = self._tokenize(
             current_text,
             base_profile=current_profile,
             allow_mixed=True,
         )
-        reference_tokens, _ = self._tokenize(
+        reference_tokens, _, _ = self._tokenize(
             reference_text,
             base_profile=reference_profile,
             allow_mixed=True,
@@ -692,9 +701,12 @@ class PhoneticTrailingSongModel:
         *,
         base_profile: LanguageProfile,
         allow_mixed: bool,
-    ) -> Tuple[List[PhoneticToken], Dict[str, int]]:
+        excluded_languages: Optional[Sequence[str]] = None,
+    ) -> Tuple[List[PhoneticToken], Dict[str, int], Dict[str, int]]:
         tokens: List[PhoneticToken] = []
         usage: Dict[str, int] = {}
+        excluded_hits: Dict[str, int] = {}
+        excluded_set = {code.lower() for code in excluded_languages or []}
         for index, match in enumerate(_WORD_RE.finditer(text)):
             raw = match.group(0)
             if allow_mixed:
@@ -704,6 +716,13 @@ class PhoneticTrailingSongModel:
                     fallback=base_profile.code,
                 )
             else:
+                profile = base_profile
+
+            original_code = profile.code
+            excluded_language = None
+            if original_code.lower() in excluded_set:
+                excluded_language = original_code
+                excluded_hits[original_code] = excluded_hits.get(original_code, 0) + 1
                 profile = base_profile
 
             romanized = profile.romanize(raw)
@@ -728,6 +747,8 @@ class PhoneticTrailingSongModel:
                     LanguageLayer("language_name", profile.name),
                 ],
             )
+            if excluded_language:
+                layers.layers.append(LanguageLayer("excluded_language", excluded_language))
             tokens.append(
                 PhoneticToken(
                     index=index,
@@ -746,7 +767,7 @@ class PhoneticTrailingSongModel:
                 )
             )
             usage[profile.code] = usage.get(profile.code, 0) + 1
-        return tokens, usage
+        return tokens, usage, excluded_hits
 
     def _build_title_sound_summaries(
         self, text: str, tokens: Sequence[PhoneticToken]
@@ -1282,6 +1303,7 @@ class PhoneticTrailingSongModel:
         include_report: bool = True,
         include_comparability: bool = True,
         language_code: Optional[str] = None,
+        exclude_languages: Optional[Sequence[str]] = None,
     ) -> DataGenerationBundle:
         analysis = self.analyze(
             text,
@@ -1291,6 +1313,7 @@ class PhoneticTrailingSongModel:
             window_size=window_size,
             compare=bool(reference_text and include_comparability),
             language_code=language_code,
+            exclude_languages=exclude_languages,
         )
         report = self.build_report(analysis, include_comparability=include_comparability) if include_report else None
         comparability_dict = (
@@ -1359,6 +1382,7 @@ def analyze_text(
     reference_text: Optional[str] = None,
     window_size: int = 4,
     language_code: Optional[str] = None,
+    exclude_languages: Optional[Sequence[str]] = None,
 ) -> AnalysisResult:
     model = PhoneticTrailingSongModel()
     return model.analyze(
@@ -1368,6 +1392,7 @@ def analyze_text(
         window_size=window_size,
         compare=bool(reference_text),
         language_code=language_code,
+        exclude_languages=exclude_languages,
     )
 
 
@@ -1380,6 +1405,7 @@ def prepare_data_generation(
     include_report: bool = True,
     include_comparability: bool = True,
     language_code: Optional[str] = None,
+    exclude_languages: Optional[Sequence[str]] = None,
 ) -> DataGenerationBundle:
     model = PhoneticTrailingSongModel()
     return model.prepare_data_generation(
@@ -1390,6 +1416,7 @@ def prepare_data_generation(
         include_report=include_report,
         include_comparability=include_comparability,
         language_code=language_code,
+        exclude_languages=exclude_languages,
     )
 
 
@@ -1424,6 +1451,12 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Force a specific language profile (defaults to auto-detection)",
     )
     parser.add_argument(
+        "--exclude-language",
+        action="append",
+        dest="exclude_languages",
+        help="Exclude specific language codes (e.g. lin-a, lin-b) and fall back to the default",
+    )
+    parser.add_argument(
         "--list-languages",
         action="store_true",
         help="List available language profile codes and exit",
@@ -1451,6 +1484,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
         window_size=args.compare_window_size,
         compare=bool(reference_text),
         language_code=args.language_code,
+        exclude_languages=args.exclude_languages,
     )
 
     if args.select_token is not None:
@@ -1488,6 +1522,7 @@ def _main(argv: Optional[Sequence[str]] = None) -> int:
             include_report=not args.no_report,
             include_comparability=bool(reference_text),
             language_code=args.language_code,
+            exclude_languages=args.exclude_languages,
         )
         Path(args.emit_data_bundle).write_text(
             json.dumps(bundle.as_dict(), ensure_ascii=False, indent=2),

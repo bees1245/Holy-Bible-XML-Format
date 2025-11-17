@@ -33,6 +33,7 @@ Key options:
 * `--no-report` and `--emit-json` – suppress the textual report and emit a JSON payload instead.
 * `--emit-data-bundle PATH` – create a machine-learning friendly bundle with prompts and completions.
 * `--language-code CODE` – force a specific language profile (otherwise the model auto-detects per token).
+* `--exclude-language CODE` – exclude specific language codes (for example, legacy or secret scripts) and fall back to the default profile while still noting the absence in the analysis output.
 * `--list-languages` – print the available language profiles (covering Latin, Greek, Cyrillic, Arabic, Hebrew, Devanagari, Hangul, and Kana scripts) and exit.
 
 Every textual report opens with a **silent writing title** section: for each
@@ -74,6 +75,7 @@ POST JSON requests to `/analyze` with the following schema:
   "text": "Amazing grace how sweet the sound",
   "reference_text": "Amazing grace a song of sound",
   "language_code": "el",
+  "exclude_languages": ["lin-a", "lin-b"],
   "options": {
     "include_bundle": true,
     "window_size": 2,

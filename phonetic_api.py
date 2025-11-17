@@ -96,6 +96,13 @@ class PhoneticAPI:
         include_report = options.get("include_report", True)
         include_comparability = options.get("include_comparability", bool(reference_text))
         language_code = data.get("language_code") or options.get("language_code")
+        exclude_languages = options.get("exclude_languages") or data.get("exclude_languages")
+        if exclude_languages is not None and not isinstance(exclude_languages, list):
+            return self._respond_json(
+                start_response,
+                {"error": "'exclude_languages' must be a list of language codes"},
+                status="400 Bad Request",
+            )
 
         analysis = self._model.analyze(
             text,
@@ -105,6 +112,7 @@ class PhoneticAPI:
             window_size=window_size,
             compare=bool(reference_text and include_comparability),
             language_code=language_code,
+            exclude_languages=exclude_languages,
         )
 
         response = {
@@ -120,6 +128,7 @@ class PhoneticAPI:
                 include_report=include_report,
                 include_comparability=include_comparability,
                 language_code=language_code,
+                exclude_languages=exclude_languages,
             )
             response["bundle"] = bundle.as_dict()
 
